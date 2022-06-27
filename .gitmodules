@@ -1,0 +1,3 @@
+[submodule "pybullet_suite"]
+	path = pybullet_suite
+	url = https://github.com/kh11kim/pybullet_suite.git
