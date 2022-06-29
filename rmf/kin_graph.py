@@ -1,16 +1,44 @@
+from doctest import ELLIPSIS_MARKER
 from .elements import *
-from .action_plan import *
+from .data_structure import Action
+from dataclasses import dataclass, field
+from typing import Optional
+
 
 ## Simplified version of Kinematic graph / Plan graph
+# class KinEdge_:
+#     def __init__(self):
+#         self.parent
+
 class KinRelation:
     """ Simplified version of kinematic graph.
     """
     def __init__(self):
         self.obj_type = {} #assume one robot in the world
-        self.parent: Dict[str, str] = {}
-        self.child = {}
+        #self.parent: Dict[str, List[str]] = {}
+        self.grasp: Dict[str, str] = {}
+        self.placement: Dict[str, str] = {}
+        self.child: Dict[str, List[str]] = {}
         self.add_robot()
+    
+    def __eq__(self, other: "KinRelation"):
+        same_grasp = self.grasp == other.grasp
+        same_placement = self.placement == other.placement
+        same_child = self.child == other.child
+        return same_grasp & same_placement & same_child
 
+    @property
+    def holding(self):
+        return len(self.grasp.keys()) != 0
+
+    @property
+    def parent(self):
+        result = {}
+        result.update(self.grasp)
+        result.update(self.placement)
+        return result
+
+        
     def copy(self):
         return deepcopy(self)
 
@@ -34,40 +62,79 @@ class KinRelation:
 
     def add_robot(self):
         self.obj_type["robot"] = "robot"
-        self.parent["robot"] = None
 
     # robot, fixed
-    def add_object(self, name:str, obj_type:str, parent_name: str=None):
+    def add_object(self, name:str, obj_type:str, parent_name: str=None, edge_type: str=None):
         self.obj_type[name] = obj_type
-        if obj_type == "fixed":
-            self.parent[name] = None
-            self.child[name] = None
-        elif obj_type == "movable":
+        if obj_type == "Fixed":
+            self.child[name] = []
+        
+        elif obj_type == "Movable":
             assert parent_name in self.obj_type.keys(), f"parent_name of {name} should be given"
-            self.parent[name] = parent_name
-            self.child[parent_name] = name
-    
-    def apply_action(self, action: Action):
+            if edge_type == "Grasp":
+                self.grasp[name] = parent_name
+                self.child[parent_name].append(name)
+            elif edge_type == "Placement":
+                self.placement[name] = parent_name
+                self.child[parent_name].append(name)
+
+    def get_next_transition(self, action: Action):
+        transition = self.copy()
+        
+        obj_name = action.obj_name
+        if action.name == "pick":
+            #change grasp
+            transition.grasp[obj_name] = "robot"
+            transition.child["robot"] = [obj_name]
+
+        elif action.name == "place":
+            #change placement
+            if obj_name in transition.placement.keys():
+                old_parent = transition.placement[obj_name]
+                transition.child[old_parent].remove(obj_name)
+            new_parent = action.placeable_name
+            transition.placement[obj_name] = new_parent
+            transition.child[new_parent].append(obj_name)
+        
+        elif action.name == "move_free":
+            #remove grasp
+            grasping_obj_name = transition.child["robot"][0]
+            transition.grasp.pop(grasping_obj_name)
+            transition.child["robot"] = []
+
+        elif action.name == "move_hold":
+            #remove placement
+            parent = transition.placement[obj_name]
+            transition.placement.pop(obj_name)
+            transition.child[parent].remove(obj_name)
+        else:
+            raise ValueError()
+        return transition
+
+    def get_next_relation(self, action: Action):
         """Mode switch by action
         """
-        relation_new = self.copy()
+        relation = self.copy()
 
-        if action.name == "move":
-            return relation_new
+        if action.name in ["move_free", "move_hold"]:
+            return relation
 
-        old_parent = relation_new.parent[action.obj_name]
+        if action.obj_name in relation.parent.keys():
+            old_parent = relation.parent[action.obj_name]
+            relation.child[old_parent].remove(action.obj_name)
+
         if action.name == "pick":
             assert action.placeable_name is None, f"action {action.name} shouldn't have a placement"
-            new_parent = "robot"
+            relation.placement.pop(action.obj_name)
+            relation.grasp[action.obj_name] = "robot"
+            relation.child["robot"] = [action.obj_name]
             
         elif action.name == "place":
             assert action.placeable_name is not None, f"action {action.name} should have a placement"
-            new_parent = action.placeable_name
-
-        relation_new.parent[action.obj_name] = new_parent
-        relation_new.child[old_parent] = None
-        relation_new.child[new_parent] = action.obj_name
-        return relation_new
+            relation.grasp.pop(action.obj_name)
+            relation.placement[action.obj_name] = action.placeable_name
+            relation.child[action.placeable_name].append(action.obj_name)
+        return relation
 
 class KinGraph:
     def __init__(
@@ -124,7 +191,7 @@ class KinGraph:
             assert edge is not None, f"edge of {name} should be given"
         
         self.objects[name] = obj
-        self.relation.add_object(name, obj_type.__name__, parent_name)
+        self.relation.add_object(name, obj_type.__name__, parent_name, edge_type=type(edge).__name__)
 
         if obj_type is Movable:
             self.kin_edge[name] = edge
@@ -144,7 +211,7 @@ class KinGraph:
             self.objects[obj_name].set_base_pose(obj_pose)
             return obj_pose
         if config:
-            self.robot.set_arm_angles(config.q)
+            self.robot.set_joint_angles(config.q)
         for movable_names in self.movables:
             assign_obj(movable_names)
     
@@ -156,7 +223,7 @@ class KinGraph:
         graph = self.copy()
         if action.name == "move":
             return graph
-        graph.relation = graph.relation.apply_action(action)
+        graph.relation = graph.relation.get_next_relation(action)
         # obj_name = action.obj_name
         # parent_old_name = graph.relation.parent[obj_name]
         # if action.name == "pick":
@@ -174,18 +241,21 @@ class KinGraph:
 
     def is_collision(self, config: Config):
         robot: Panda = self.objects["robot"]
-        robot.set_arm_angles(config.q)
+        robot.set_joint_angles(config.q)
         self.assign()
         
         if self.world.is_self_collision(robot):
             return True
         
-        for movable_name in self.movables:
+        
+        for obj_name in self.movables+["robot"]:
             object_names = list(self.objects.keys())
-            others = object_names.remove(movable_name) #check except myself
-            others = object_names.remove(self.relation.parent[movable_name]) #check except parent
+            object_names.remove(obj_name) #check except myself
+            if obj_name in self.relation.movables:
+                if self.relation.parent[obj_name]:
+                    object_names.remove(self.relation.parent[obj_name]) #check except parent
             if self.world.is_body_pairwise_collision(
-                body=movable_name, obstacles=others):
+                body=obj_name, obstacles=object_names):
                 return True
         return False
         
@@ -210,7 +280,7 @@ class KinGraph:
         if placeable_name in self.movables:
             xyz = placeable.get_base_pose().trans
         elif placeable_name in self.fixed:
-            xyz = placeable.sample_from_plane()
+            xyz = placeable.sample_point()
         z_axis = movable.sample_placement_axis()
 
         return Placement.from_body_point_and_placement_axes(

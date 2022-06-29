@@ -111,7 +111,11 @@ class Grasp(KinEdge):
     def get_pre_pose(self, pose: Pose):
         pre_pose = Pose(trans=[0,0,-PRE_POSE_DISTANCE])
         return pose * pre_pose
-        
+    
+    def __eq__(self, other: "Grasp"):
+        same_index = self.index == other.index
+        same_movable_name = self.movable_name == other.movable_name
+        return same_index & same_movable_name
     
 class Placement(KinEdge):
     def __init__(
@@ -126,8 +130,14 @@ class Placement(KinEdge):
         self.placeable_name = placeable_name
 
     def get_pre_pose(self, pose: Pose):
-        pre_pose = Pose(translation=[0,0,+PRE_POSE_DISTANCE])
+        pre_pose = Pose(trans=[0,0,+PRE_POSE_DISTANCE])
         return pre_pose * pose
+    
+    def __eq__(self, other: "Placement"):
+        same_movable_name = self.movable_name == other.movable_name
+        same_placeable_name = self.placeable_name == other.placeable_name
+        same_tf = self.tf == other.tf
+        return same_movable_name & same_placeable_name & same_tf
 
     @classmethod
     def from_bodies(
@@ -195,7 +205,7 @@ class Config:
 
     @classmethod
     def from_robot(cls, robot: Panda):
-        q = robot.get_arm_angles()
+        q = robot.get_joint_angles()
         T = robot.get_ee_pose()
         return cls(q, T)
 
